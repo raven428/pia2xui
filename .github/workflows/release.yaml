@@ -1,0 +1,37 @@
+---
+name: release builder
+on:
+  push:
+    tags:
+      - "*"
+jobs:
+  release:
+    name: build and release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VER: ${{ github.ref_name }}
+    steps:
+      - name: install pixz
+        run: sudo apt-get install -y pixz
+      - name: checkout the repos
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          submodules: recursive
+      - name: install golang
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          check-latest: true
+      - name: build binaries and archives
+        run: make build balls
+      - name: make release and upload archives
+        uses: ncipollo/release-action@v1
+        with:
+          name: pia2xui ${{ github.ref_name }}
+          allowUpdates: true
+          artifacts: ".balls/*"
+          body: version ${{ github.ref_name }} of pia2xui

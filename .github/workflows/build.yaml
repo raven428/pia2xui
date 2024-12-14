@@ -1,0 +1,48 @@
+---
+name: build binaries
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  schedule:
+    - cron: "11 11 * * 1"
+jobs:
+  build-n-push:
+    name: build binaries
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      VER: v999
+    steps:
+      - name: install pixz
+        run: sudo apt-get install -y pixz
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: build binaries
+        if: >-
+          github.event_name == 'pull_request' || (
+            (github.event_name == 'schedule' || github.event_name == 'push')
+          ) && github.ref == 'refs/heads/master'
+        run: make build balls
+      - name: make release and upload binaries
+        if: >-
+          (github.event_name == 'schedule' || github.event_name == 'push')
+          && github.ref == 'refs/heads/master'
+        uses: ncipollo/release-action@v1
+        with:
+          name: >
+            branch [${{
+              github.head_ref == '' && github.ref_name || github.head_ref
+            }}] binaries
+          draft: true
+          allowUpdates: true
+          tag: ${{ env.VER }}
+          artifacts: ".balls/*"
+          body: >
+            branch [${{
+              github.head_ref == '' && github.ref_name || github.head_ref
+            }}] pia2xui from recent commit by GitHub actions
