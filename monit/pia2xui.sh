@@ -2,6 +2,7 @@
 set -u
 r="${1:-"santiago"}"
 t="${2:-"wg-proton-cl27"}"
+fcn="${3:-""}"
 my_bin="$(readlink -f "$0")"
 my_dir="$(dirname "${my_bin}")"
 exec 9> "${my_bin%.*}.lock"
@@ -14,5 +15,7 @@ source "${my_dir}"/creds.sh
   -region "${r}" \
   -username "${l}" \
   -password "${p}" \
+  -filter-cn "${fcn}" \
+  -retry-count 7 \
   -db /etc/x-ui/x-ui.db \
   -cert "${my_dir}"/ca.rsa.4096.crt
