@@ -16,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,27 +80,66 @@ func generateKeys() (string, string, error) {
 	return privateKeyBase64, publicKeyBase64, nil
 }
 
-func getServerInfo(regionID string) (string, string, error) {
-	resp, err := http.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
-	if err != nil {
-		return "", "", fmt.Errorf("failed to fetch server info: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", fmt.Errorf("failed to decode server info: %v", err)
-	}
-
-	for _, region := range result["regions"].([]interface{}) {
-		r := region.(map[string]interface{})
-		if r["id"].(string) == regionID {
-			server := r["servers"].(map[string]interface{})["wg"].([]interface{})[0].(map[string]interface{})
-			return server["ip"].(string), server["cn"].(string), nil
+func getServerInfo(regionID string, filters ...string) (string, string, error) {
+	retryCount := 5
+	cnFilter := ".+"
+	ipFilter := ".+"
+	if len(filters) > 0 && filters[0] != "" {
+		var err error
+		retryCount, err = strconv.Atoi(filters[0])
+		if err != nil || retryCount <= 0 {
+			retryCount = 4
 		}
 	}
-
-	return "", "", fmt.Errorf("region %s not found", regionID)
+	if len(filters) > 1 && filters[1] != "" {
+		cnFilter = filters[1]
+	}
+	if len(filters) > 2 && filters[2] != "" {
+		ipFilter = filters[2]
+	}
+	log.Printf("retries [%d] filters cn [%s] ip [%s] count", retryCount, cnFilter, ipFilter)
+	for attempt := 1; attempt <= retryCount; attempt++ {
+		resp, err := http.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
+		if err != nil {
+			if attempt == retryCount-1 {
+				return "", "", fmt.Errorf("failed to fetch server info: %v", err)
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			if attempt == retryCount-1 {
+				return "", "", fmt.Errorf("failed to decode server info: %v", err)
+			}
+			continue
+		}
+		ipRegex, err := regexp.Compile(ipFilter)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid IP filter regex: %v", err)
+		}
+		cnRegex, err := regexp.Compile(cnFilter)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid CN filter regex: %v", err)
+		}
+		for _, region := range result["regions"].([]interface{}) {
+			r := region.(map[string]interface{})
+			if r["id"].(string) == regionID {
+				servers := r["servers"].(map[string]interface{})["wg"].([]interface{})
+				for _, server := range servers {
+					s := server.(map[string]interface{})
+					ip := s["ip"].(string)
+					cn := s["cn"].(string)
+					log.Printf("atmp [%d] ip [%s] cn [%s]", attempt, ip, cn)
+					if ipRegex.MatchString(ip) && cnRegex.MatchString(cn) {
+						log.Printf("res ip [%s] cn [%s]", ip, cn)
+						return ip, cn, nil
+					}
+				}
+			}
+		}
+	}
+	return "", "", fmt.Errorf("region %s not found or no server matched filters", regionID)
 }
 
 func getPiaToken(username, password string) (string, error) {
@@ -283,7 +324,10 @@ func main() {
 	// Параметры командной строки
 	username := flag.String("username", "", "PIA username")
 	password := flag.String("password", "", "PIA password")
-	regionID := flag.String("region", "fi", "Region ID for server info")
+	regionID := flag.String("region", "turkey", "Region ID for server info")
+	filterIP := flag.String("filter-ip", "", "regexp filter for server ip")
+	filterCN := flag.String("filter-cn", "", "regexp filter for server cn")
+	retryCount := flag.String("retry-count", "3", "maximum retries count")
 	tag := flag.String("tag", "wg-proton-tr23", "Tag for xray config")
 	certPath := flag.String("cert", "ca.rsa.4096.crt", "Path to the CA certificate")
 	dbPath := flag.String("db", "x-ui.db", "Path to the SQLite database")
@@ -300,7 +344,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	serverIP, serverCN, err := getServerInfo(*regionID)
+	serverIP, serverCN, err := getServerInfo(*regionID, *retryCount, *filterCN, *filterIP)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
