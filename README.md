@@ -17,10 +17,10 @@ Update 3x-ui WireGuard outbound from the PIA account
 * choose tag to release:
 
   ```shell
-    export VER=v000 && git checkout master && git pull
+    export VER=v001 && git checkout master && git pull
   ```
 
-* perform something of bellow:
+* perform something of below:
   * `make local` - build on local machine
   * `make gh-act` - send to GitHub actions
 
