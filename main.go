@@ -36,21 +36,14 @@ type WireGuardResponse struct {
 }
 
 type XrayTemplateConfig struct {
-	MTU            int      `json:"mtu"`
-	SecretKey      string   `json:"secretKey"`
-	Address        []string `json:"address"`
-	Workers        int      `json:"workers"`
-	DomainStrategy string   `json:"domainStrategy"`
-	Peers          []Peer   `json:"peers"`
-	KernelMode     bool     `json:"kernelMode"`
-	KernelTun      bool     `json:"kernelTun"`
+	SecretKey string   `json:"secretKey"`
+	Address   []string `json:"address"`
+	Peers     []Peer   `json:"peers"`
 }
 
 type Peer struct {
-	PublicKey  string   `json:"publicKey"`
-	AllowedIPs []string `json:"allowedIPs"`
-	Endpoint   string   `json:"endpoint"`
-	KeepAlive  int      `json:"keepAlive"`
+	PublicKey string `json:"publicKey"`
+	Endpoint  string `json:"endpoint"`
 }
 
 // Генерация приватного и публичного ключей WireGuard
@@ -228,7 +221,9 @@ func addKey(cn, ip, piaToken, publicKey, certPath string) (*WireGuardResponse, e
 	return &result, nil
 }
 
-func updateXrayTemplateConfig(dbPath, tag string, newSettings XrayTemplateConfig) error {
+func updateXrayTemplateConfig(dbPath, tag string,
+	newSettings XrayTemplateConfig,
+	simulate bool) error {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %v", err)
@@ -262,9 +257,20 @@ func updateXrayTemplateConfig(dbPath, tag string, newSettings XrayTemplateConfig
 		if !ok {
 			continue
 		}
-
 		if outboundMap["tag"] == tag {
-			outboundMap["settings"] = newSettings
+			existingSettings, ok := outboundMap["settings"].(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("invalid settings format")
+			}
+			existingSettings["secretKey"] = newSettings.SecretKey
+			existingSettings["address"] = newSettings.Address
+			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["endpoint"] =
+				newSettings.Peers[0].Endpoint
+			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["publicKey"] =
+				newSettings.Peers[0].PublicKey
+			if !simulate {
+				outboundMap["settings"] = existingSettings
+			}
 			found = true
 			break
 		}
@@ -332,14 +338,11 @@ func main() {
 	certPath := flag.String("cert", "ca.rsa.4096.crt", "Path to the CA certificate")
 	dbPath := flag.String("db", "x-ui.db", "Path to the SQLite database")
 	serviceName := flag.String("service", "x-ui.service", "Service name for systemd")
-
 	flag.Parse()
-
 	// Проверка обязательных параметров
 	if *username == "" || *password == "" {
 		log.Fatal("username and password are required")
 	}
-
 	privateKey, publicKey, err := generateKeys()
 	if err != nil {
 		log.Fatalf("%v", err)
@@ -347,6 +350,24 @@ func main() {
 	serverIP, serverCN, err := getServerInfo(*regionID, *retryCount, *filterCN, *filterIP)
 	if err != nil {
 		log.Fatalf("%v", err)
+	}
+	config := XrayTemplateConfig{
+		SecretKey: privateKey,
+		Address:   []string{fmt.Sprintf("simulate")},
+		Peers: []Peer{
+			{
+				PublicKey: "simulate",
+				Endpoint:  fmt.Sprintf("simulate"),
+			},
+		},
+	}
+	active, err := manageService("is-active", *serviceName)
+	if err != nil {
+		log.Printf("Failed to check service status: %v", err)
+	}
+	err = updateXrayTemplateConfig(*dbPath, *tag, config, true)
+	if err != nil {
+		log.Fatalf("Failed to test 3x: %v", err)
 	}
 	token, err := getPiaToken(*username, *password)
 	if err != nil {
@@ -356,41 +377,30 @@ func main() {
 	if err != nil {
 		log.Fatalf("AddWG fatal: %v", err)
 	}
-	log.Printf("WireGuard key added successfully: %+v", wgResp)
-
-	config := XrayTemplateConfig{
-		MTU:            1420,
-		SecretKey:      privateKey,
-		Address:        []string{fmt.Sprintf("%s/32", wgResp.PeerIP)},
-		Workers:        2,
-		DomainStrategy: "ForceIPv4",
+	config = XrayTemplateConfig{
+		SecretKey: privateKey,
+		Address:   []string{fmt.Sprintf("%s/32", wgResp.PeerIP)},
 		Peers: []Peer{
 			{
-				PublicKey:  wgResp.ServerKey,
-				AllowedIPs: []string{"0.0.0.0/0", "::/0"},
-				Endpoint:   fmt.Sprintf("%s:%d", wgResp.ServerIP, wgResp.ServerPort),
-				KeepAlive:  13,
+				PublicKey: wgResp.ServerKey,
+				Endpoint:  fmt.Sprintf("%s:%d", wgResp.ServerIP, wgResp.ServerPort),
 			},
 		},
-		KernelMode: false,
-		KernelTun:  false,
 	}
-
-	active, err := manageService("is-active", *serviceName)
-	if err != nil {
-		log.Printf("Failed to check service status: %v", err)
-	}
-
 	if active {
 		log.Printf("Stopping service: %s", *serviceName)
+		defer manageService("start", *serviceName)
 		_, err := manageService("stop", *serviceName)
 		if err != nil {
-			log.Printf("Failed to stop service: %v", err)
+			log.Fatalf("Failed to stop service: %v", err)
 		}
 	}
-
-	updateXrayTemplateConfig(*dbPath, *tag, config)
-
+	err = updateXrayTemplateConfig(*dbPath, *tag, config, false)
+	if err != nil {
+		log.Printf("Failed to update 3x: %v", err)
+	} else {
+		log.Printf("WireGuard key added successfully: %+v", wgResp)
+	}
 	if active {
 		log.Printf("Starting service: %s", *serviceName)
 		manageService("start", *serviceName)
