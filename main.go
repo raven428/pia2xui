@@ -143,12 +143,10 @@ func getPiaToken(username, password string) (string, error) {
 		return "", fmt.Errorf("failed to fetch token: %v", err)
 	}
 	defer resp.Body.Close()
-
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode token response: %v", err)
 	}
-
 	return result["token"].(string), nil
 }
 
@@ -250,7 +248,6 @@ func updateXrayTemplateConfig(dbPath, tag string,
 	if !ok {
 		return fmt.Errorf("invalid or missing 'outbounds' field in config")
 	}
-
 	found := false
 	for _, outbound := range outbounds {
 		outboundMap, ok := outbound.(map[string]interface{})
@@ -264,18 +261,13 @@ func updateXrayTemplateConfig(dbPath, tag string,
 			}
 			existingSettings["secretKey"] = newSettings.SecretKey
 			existingSettings["address"] = newSettings.Address
-			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["endpoint"] =
-				newSettings.Peers[0].Endpoint
+			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["endpoint"] = newSettings.Peers[0].Endpoint
 			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["publicKey"] =
 				newSettings.Peers[0].PublicKey
-			if !simulate {
-				outboundMap["settings"] = existingSettings
-			}
 			found = true
 			break
 		}
 	}
-
 	if !found {
 		return fmt.Errorf("tag '%s' not found in 'outbounds'", tag)
 	}
@@ -287,9 +279,25 @@ func updateXrayTemplateConfig(dbPath, tag string,
 	}
 
 	// 5. Обновление базы данных
-	_, err = db.Exec("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", string(modifiedConfigJSON))
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("Failed to start transaction: %v", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", string(modifiedConfigJSON))
 	if err != nil {
 		return fmt.Errorf("failed to update config in database: %v", err)
+	}
+	if simulate {
+		tx.Rollback()
+		if err != nil {
+			return fmt.Errorf("Failed to rollback transaction: %v", err)
+		}
+	} else {
+		tx.Commit()
+		if err != nil {
+			return fmt.Errorf("Failed to commit transaction: %v", err)
+		}
 	}
 
 	return nil
@@ -298,13 +306,11 @@ func updateXrayTemplateConfig(dbPath, tag string,
 func manageService(action, serviceName string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Second)
 	defer cancel()
-
 	conn, err := dbus.NewSystemdConnectionContext(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to connect to systemd: %v", err)
 	}
 	defer conn.Close()
-
 	switch action {
 	case "start":
 		_, err = conn.StartUnitContext(ctx, serviceName, "replace", nil)
@@ -312,6 +318,24 @@ func manageService(action, serviceName string) (bool, error) {
 	case "stop":
 		_, err = conn.StopUnitContext(ctx, serviceName, "replace", nil)
 		return false, err
+	case "restart":
+		_, err := conn.StopUnitContext(ctx, serviceName, "replace", nil)
+		if err != nil {
+			return false, fmt.Errorf("failed to stop service: %v", err)
+		}
+		for {
+			unitStatus, err := conn.GetUnitPropertyContext(ctx, serviceName, "ActiveState")
+			if err != nil {
+				return false, fmt.Errorf("failed to get service status after stop: %v", err)
+			}
+			if strings.Trim(unitStatus.Value.String(), "\"") == "inactive" {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		_, err = conn.StartUnitContext(ctx, serviceName, "replace", nil)
+		return err == nil, err
+
 	case "is-active":
 		unitStatus, err := conn.GetUnitPropertyContext(ctx, serviceName, "ActiveState")
 		if err != nil {
@@ -347,10 +371,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	serverIP, serverCN, err := getServerInfo(*regionID, *retryCount, *filterCN, *filterIP)
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
 	config := XrayTemplateConfig{
 		SecretKey: privateKey,
 		Address:   []string{fmt.Sprintf("simulate")},
@@ -368,6 +388,10 @@ func main() {
 	err = updateXrayTemplateConfig(*dbPath, *tag, config, true)
 	if err != nil {
 		log.Fatalf("Failed to test 3x: %v", err)
+	}
+	serverIP, serverCN, err := getServerInfo(*regionID, *retryCount, *filterCN, *filterIP)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 	token, err := getPiaToken(*username, *password)
 	if err != nil {
@@ -389,7 +413,7 @@ func main() {
 	}
 	if active {
 		log.Printf("Stopping service: %s", *serviceName)
-		defer manageService("start", *serviceName)
+		defer manageService("restart", *serviceName)
 		_, err := manageService("stop", *serviceName)
 		if err != nil {
 			log.Fatalf("Failed to stop service: %v", err)
@@ -401,8 +425,9 @@ func main() {
 	} else {
 		log.Printf("WireGuard key added successfully: %+v", wgResp)
 	}
-	if active {
-		log.Printf("Starting service: %s", *serviceName)
-		manageService("start", *serviceName)
+	log.Printf("Restarting service anyway: %s", *serviceName)
+	_, err = manageService("restart", *serviceName)
+	if err != nil {
+		log.Printf("Failed to restart service: %v", err)
 	}
 }
