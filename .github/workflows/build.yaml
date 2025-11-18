@@ -22,16 +22,22 @@ jobs:
         with:
           fetch-depth: 0
           submodules: true
+      - name: install golang
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          check-latest: true
       - name: build binaries
         if: >-
           github.event_name == 'pull_request' || (
             (github.event_name == 'schedule' || github.event_name == 'push')
           ) && github.ref == 'refs/heads/master'
         run: make build balls
-      - name: make release and upload binaries
+      - name: make draft and upload binaries
         if: >-
-          (github.event_name == 'schedule' || github.event_name == 'push')
-          && github.ref == 'refs/heads/master'
+          github.event_name == 'pull_request' || (
+            (github.event_name == 'schedule' || github.event_name == 'push')
+          ) && github.ref == 'refs/heads/master'
         uses: ncipollo/release-action@v1
         with:
           name: >
@@ -40,7 +46,7 @@ jobs:
             }}] binaries
           draft: true
           allowUpdates: true
-          tag: ${{ env.VER }}
+          tag: v999
           artifacts: ".balls/*"
           body: >
             branch [${{
