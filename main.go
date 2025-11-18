@@ -54,80 +54,75 @@ func generateKeys() (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("failed to generate private key: %v", err)
 	}
-
 	// Преобразуем в массив и маскируем
 	var privateKey [32]byte
 	copy(privateKey[:], privateKeySlice)
 	privateKey[0] &= 248
 	privateKey[31] &= 127
 	privateKey[31] |= 64
-
 	// Вычисляем публичный ключ
 	var publicKey [32]byte
 	curve25519.ScalarBaseMult(&publicKey, &privateKey)
-
 	// Кодируем ключи в Base64
 	privateKeyBase64 := base64.StdEncoding.EncodeToString(privateKey[:])
 	publicKeyBase64 := base64.StdEncoding.EncodeToString(publicKey[:])
-
 	return privateKeyBase64, publicKeyBase64, nil
 }
 
 func getServerInfo(regionID string, filters ...string) (string, string, error) {
-	retryCount := 5
+	var err error
 	cnFilter := ".+"
 	ipFilter := ".+"
 	if len(filters) > 0 && filters[0] != "" {
-		var err error
-		retryCount, err = strconv.Atoi(filters[0])
-		if err != nil || retryCount <= 0 {
-			retryCount = 4
-		}
+		cnFilter = filters[0]
 	}
 	if len(filters) > 1 && filters[1] != "" {
-		cnFilter = filters[1]
+		ipFilter = filters[1]
 	}
+	timeoutServer := 3
 	if len(filters) > 2 && filters[2] != "" {
-		ipFilter = filters[2]
+		timeoutServer, err = strconv.Atoi(filters[2])
+		if err != nil || timeoutServer <= 0 {
+			timeoutServer = 3
+		}
 	}
-	log.Printf("retries [%d] filters cn [%s] ip [%s] count", retryCount, cnFilter, ipFilter)
-	for attempt := 1; attempt <= retryCount; attempt++ {
-		resp, err := http.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
-		if err != nil {
-			if attempt == retryCount-1 {
-				return "", "", fmt.Errorf("failed to fetch server info: %v", err)
-			}
-			continue
-		}
-		defer resp.Body.Close()
-		var result map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			if attempt == retryCount-1 {
-				return "", "", fmt.Errorf("failed to decode server info: %v", err)
-			}
-			continue
-		}
-		ipRegex, err := regexp.Compile(ipFilter)
-		if err != nil {
-			return "", "", fmt.Errorf("invalid IP filter regex: %v", err)
-		}
-		cnRegex, err := regexp.Compile(cnFilter)
-		if err != nil {
-			return "", "", fmt.Errorf("invalid CN filter regex: %v", err)
-		}
-		for _, region := range result["regions"].([]interface{}) {
-			r := region.(map[string]interface{})
-			if r["id"].(string) == regionID {
-				servers := r["servers"].(map[string]interface{})["wg"].([]interface{})
-				for _, server := range servers {
-					s := server.(map[string]interface{})
-					ip := s["ip"].(string)
-					cn := s["cn"].(string)
-					log.Printf("atmp [%d] ip [%s] cn [%s]", attempt, ip, cn)
-					if ipRegex.MatchString(ip) && cnRegex.MatchString(cn) {
-						log.Printf("res ip [%s] cn [%s]", ip, cn)
-						return ip, cn, nil
-					}
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: time.Duration(timeoutServer) * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   time.Duration(timeoutServer) * time.Second,
+			ResponseHeaderTimeout: time.Duration(timeoutServer) * time.Second,
+		},
+	}
+	resp, err := client.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to fetch server info: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("failed to decode server info: %v", err)
+	}
+	ipRegex, err := regexp.Compile(ipFilter)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid IP filter regex: %v", err)
+	}
+	cnRegex, err := regexp.Compile(cnFilter)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid CN filter regex: %v", err)
+	}
+	for _, region := range result["regions"].([]interface{}) {
+		r := region.(map[string]interface{})
+		if r["id"].(string) == regionID {
+			servers := r["servers"].(map[string]interface{})["wg"].([]interface{})
+			for _, server := range servers {
+				s := server.(map[string]interface{})
+				ip := s["ip"].(string)
+				cn := s["cn"].(string)
+				if ipRegex.MatchString(ip) && cnRegex.MatchString(cn) {
+					log.Printf("ip [%s] cn [%s]", ip, cn)
+					return ip, cn, nil
 				}
 			}
 		}
@@ -135,24 +130,39 @@ func getServerInfo(regionID string, filters ...string) (string, string, error) {
 	return "", "", fmt.Errorf("region %s not found or no server matched filters", regionID)
 }
 
-func getPiaToken(username, password string) (string, error) {
+func getPiaToken(username, password, timeout string) (string, error) {
+	timeoutServer, err := strconv.Atoi(timeout)
+	if err != nil || timeoutServer <= 0 {
+		timeoutServer = 3
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: time.Duration(timeoutServer) * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   time.Duration(timeoutServer) * time.Second,
+			ResponseHeaderTimeout: time.Duration(timeoutServer) * time.Second,
+		},
+	}
 	data := fmt.Sprintf("username=%s&password=%s", username, password)
-	resp, err := http.Post("https://www.privateinternetaccess.com/api/client/v2/token",
+	resp, err := client.Post("https://www.privateinternetaccess.com/api/client/v2/token",
 		"application/x-www-form-urlencoded", bytes.NewBufferString(data))
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch token: %v", err)
 	}
 	defer resp.Body.Close()
-
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("failed to decode token response: %v", err)
 	}
-
 	return result["token"].(string), nil
 }
 
-func addKey(cn, ip, piaToken, publicKey, certPath string) (*WireGuardResponse, error) {
+func addKey(cn, ip, piaToken, publicKey, certPath, timeout string) (*WireGuardResponse, error) {
+	timeoutServer, err := strconv.Atoi(timeout)
+	if err != nil || timeoutServer <= 0 {
+		timeoutServer = 3
+	}
 	// Настраиваем кастомный транспорт для перенаправления подключения
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
@@ -164,10 +174,13 @@ func addKey(cn, ip, piaToken, publicKey, certPath string) (*WireGuardResponse, e
 			if addr == fmt.Sprintf("%s:1337", cn) {
 				addr = fmt.Sprintf("%s:1337", ip)
 			}
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
+			return (&net.Dialer{
+				Timeout: time.Duration(timeoutServer) * time.Second,
+			}).DialContext(ctx, network, addr)
 		},
+		TLSHandshakeTimeout:   time.Duration(timeoutServer) * time.Second,
+		ResponseHeaderTimeout: time.Duration(timeoutServer) * time.Second,
 	}
-
 	// Добавляем CA-файл
 	if certPath != "" {
 		caCert, err := os.ReadFile(certPath)
@@ -178,46 +191,38 @@ func addKey(cn, ip, piaToken, publicKey, certPath string) (*WireGuardResponse, e
 			return nil, fmt.Errorf("failed to append CA certificate to pool")
 		}
 	}
-
 	// Создаём HTTP-клиент
 	client := &http.Client{
 		Transport: transport,
 	}
-
 	// Формируем URL
 	url := fmt.Sprintf("https://%s:1337/addKey", cn)
-
 	// Настраиваем параметры запроса
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	// Добавляем параметры к URL
 	q := req.URL.Query()
 	q.Add("pt", piaToken)
 	q.Add("pubkey", publicKey)
 	req.URL.RawQuery = q.Encode()
-
 	// Выполняем запрос
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
 	defer resp.Body.Close()
-
 	// Проверяем статус ответа
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("unexpected response: %d - %s", resp.StatusCode, string(body))
 	}
-
 	// Парсим JSON-ответ
 	var result WireGuardResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to decode response JSON: %v", err)
 	}
-
 	return &result, nil
 }
 
@@ -229,7 +234,6 @@ func updateXrayTemplateConfig(dbPath, tag string,
 		return fmt.Errorf("failed to open database: %v", err)
 	}
 	defer db.Close()
-
 	// 1. Получение текущего значения из базы данных
 	var currentConfigJSON string
 	query := "SELECT value FROM settings WHERE key = 'xrayTemplateConfig'"
@@ -237,20 +241,17 @@ func updateXrayTemplateConfig(dbPath, tag string,
 	if err != nil {
 		return fmt.Errorf("failed to fetch current config: %v", err)
 	}
-
 	// 2. Парсинг текущего JSON
 	var currentConfig map[string]interface{}
 	err = json.Unmarshal([]byte(currentConfigJSON), &currentConfig)
 	if err != nil {
 		return fmt.Errorf("failed to parse current config JSON: %v", err)
 	}
-
 	// 3. Поиск и изменение нужного outbounds
 	outbounds, ok := currentConfig["outbounds"].([]interface{})
 	if !ok {
 		return fmt.Errorf("invalid or missing 'outbounds' field in config")
 	}
-
 	found := false
 	for _, outbound := range outbounds {
 		outboundMap, ok := outbound.(map[string]interface{})
@@ -264,47 +265,53 @@ func updateXrayTemplateConfig(dbPath, tag string,
 			}
 			existingSettings["secretKey"] = newSettings.SecretKey
 			existingSettings["address"] = newSettings.Address
-			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["endpoint"] =
-				newSettings.Peers[0].Endpoint
+			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["endpoint"] = newSettings.Peers[0].Endpoint
 			existingSettings["peers"].([]interface{})[0].(map[string]interface{})["publicKey"] =
 				newSettings.Peers[0].PublicKey
-			if !simulate {
-				outboundMap["settings"] = existingSettings
-			}
 			found = true
 			break
 		}
 	}
-
 	if !found {
 		return fmt.Errorf("tag '%s' not found in 'outbounds'", tag)
 	}
-
 	// 4. Конвертирование изменённого JSON обратно
 	modifiedConfigJSON, err := json.Marshal(currentConfig)
 	if err != nil {
 		return fmt.Errorf("failed to marshal modified config JSON: %v", err)
 	}
-
 	// 5. Обновление базы данных
-	_, err = db.Exec("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", string(modifiedConfigJSON))
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("Failed to start transaction: %v", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec("UPDATE settings SET value = ? WHERE key = 'xrayTemplateConfig'", string(modifiedConfigJSON))
 	if err != nil {
 		return fmt.Errorf("failed to update config in database: %v", err)
 	}
-
+	if simulate {
+		tx.Rollback()
+		if err != nil {
+			return fmt.Errorf("Failed to rollback transaction: %v", err)
+		}
+	} else {
+		tx.Commit()
+		if err != nil {
+			return fmt.Errorf("Failed to commit transaction: %v", err)
+		}
+	}
 	return nil
 }
 
 func manageService(action, serviceName string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Second)
 	defer cancel()
-
 	conn, err := dbus.NewSystemdConnectionContext(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to connect to systemd: %v", err)
 	}
 	defer conn.Close()
-
 	switch action {
 	case "start":
 		_, err = conn.StartUnitContext(ctx, serviceName, "replace", nil)
@@ -312,6 +319,23 @@ func manageService(action, serviceName string) (bool, error) {
 	case "stop":
 		_, err = conn.StopUnitContext(ctx, serviceName, "replace", nil)
 		return false, err
+	case "restart":
+		_, err := conn.StopUnitContext(ctx, serviceName, "replace", nil)
+		if err != nil {
+			return false, fmt.Errorf("failed to stop service: %v", err)
+		}
+		for {
+			unitStatus, err := conn.GetUnitPropertyContext(ctx, serviceName, "ActiveState")
+			if err != nil {
+				return false, fmt.Errorf("failed to get service status after stop: %v", err)
+			}
+			if strings.Trim(unitStatus.Value.String(), "\"") == "inactive" {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		_, err = conn.StartUnitContext(ctx, serviceName, "replace", nil)
+		return err == nil, err
 	case "is-active":
 		unitStatus, err := conn.GetUnitPropertyContext(ctx, serviceName, "ActiveState")
 		if err != nil {
@@ -333,7 +357,10 @@ func main() {
 	regionID := flag.String("region", "turkey", "Region ID for server info")
 	filterIP := flag.String("filter-ip", "", "regexp filter for server ip")
 	filterCN := flag.String("filter-cn", "", "regexp filter for server cn")
-	retryCount := flag.String("retry-count", "3", "maximum retries count")
+	timeoutToken := flag.String("timeout-token", "3", "PIA auth timeout")
+	timeoutList := flag.String("timeout-list", "3", "get servers list timeout")
+	timeoutKey := flag.String("timeout-key", "3", "add key to server timeout")
+	retryCount := flag.String("retry-count", "3", "retry count on timeout")
 	tag := flag.String("tag", "wg-proton-tr23", "Tag for xray config")
 	certPath := flag.String("cert", "ca.rsa.4096.crt", "Path to the CA certificate")
 	dbPath := flag.String("db", "x-ui.db", "Path to the SQLite database")
@@ -344,10 +371,6 @@ func main() {
 		log.Fatal("username and password are required")
 	}
 	privateKey, publicKey, err := generateKeys()
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-	serverIP, serverCN, err := getServerInfo(*regionID, *retryCount, *filterCN, *filterIP)
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -365,17 +388,66 @@ func main() {
 	if err != nil {
 		log.Printf("Failed to check service status: %v", err)
 	}
+	log.Printf("test 3x-ui database update")
 	err = updateXrayTemplateConfig(*dbPath, *tag, config, true)
 	if err != nil {
-		log.Fatalf("Failed to test 3x: %v", err)
+		log.Fatalf("Failed to test 3x-ui: %v", err)
 	}
-	token, err := getPiaToken(*username, *password)
-	if err != nil {
-		log.Fatalf("PIA token fatal: %v", err)
+	maxRetries := 3
+	maxRetries, err = strconv.Atoi(*retryCount)
+	if err != nil || maxRetries <= 0 {
+		maxRetries = 3
 	}
-	wgResp, err := addKey(serverCN, serverIP, token, publicKey, *certPath)
-	if err != nil {
-		log.Fatalf("AddWG fatal: %v", err)
+	var serverIP, serverCN string
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("retry [%02d/%02d] cn [%s] ip [%s] info", attempt, maxRetries, *filterCN, *filterIP)
+		serverIP, serverCN, err = getServerInfo(*regionID, *filterCN, *filterIP, *timeoutList)
+		if err != nil {
+			msg := fmt.Sprintf("server info: %v", err)
+			if attempt >= maxRetries {
+				log.Fatalf(msg)
+			} else {
+				log.Print(msg)
+				continue
+			}
+		} else {
+			log.Printf("info success")
+			break
+		}
+	}
+	var token string
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("retry [%02d/%02d] token", attempt, maxRetries)
+		token, err = getPiaToken(*username, *password, *timeoutToken)
+		if err != nil {
+			msg := fmt.Sprintf("PIA token: %v", err)
+			if attempt >= maxRetries {
+				log.Fatalf(msg)
+			} else {
+				log.Print(msg)
+				continue
+			}
+		} else {
+			log.Printf("token success")
+			break
+		}
+	}
+	var wgResp *WireGuardResponse
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("retry [%02d/%02d] addkey", attempt, maxRetries)
+		wgResp, err = addKey(serverCN, serverIP, token, publicKey, *certPath, *timeoutKey)
+		if err != nil {
+			msg := fmt.Sprintf("add key: %v", err)
+			if attempt >= maxRetries {
+				log.Fatalf(msg)
+			} else {
+				log.Print(msg)
+				continue
+			}
+		} else {
+			log.Printf("addkey success")
+			break
+		}
 	}
 	config = XrayTemplateConfig{
 		SecretKey: privateKey,
@@ -389,7 +461,7 @@ func main() {
 	}
 	if active {
 		log.Printf("Stopping service: %s", *serviceName)
-		defer manageService("start", *serviceName)
+		defer manageService("restart", *serviceName)
 		_, err := manageService("stop", *serviceName)
 		if err != nil {
 			log.Fatalf("Failed to stop service: %v", err)
@@ -401,8 +473,9 @@ func main() {
 	} else {
 		log.Printf("WireGuard key added successfully: %+v", wgResp)
 	}
-	if active {
-		log.Printf("Starting service: %s", *serviceName)
-		manageService("start", *serviceName)
+	log.Printf("Restarting service anyway: %s", *serviceName)
+	_, err = manageService("restart", *serviceName)
+	if err != nil {
+		log.Printf("Failed to restart service: %v", err)
 	}
 }

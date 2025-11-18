@@ -17,7 +17,7 @@ Update 3x-ui WireGuard outbound from the PIA account
 * choose tag to release:
 
   ```shell
-    export VER=v002 && git checkout master && git pull
+    export VER=v003 && git checkout master && git pull
   ```
 
 * perform something of below:
