@@ -459,9 +459,15 @@ func main() {
 			},
 		},
 	}
+	defer func() {
+		log.Printf("Restarting service anyway: %s", *serviceName)
+		_, err = manageService("restart", *serviceName)
+		if err != nil {
+			log.Printf("Failed to restart service: %v", err)
+		}
+	}()
 	if active {
 		log.Printf("Stopping service: %s", *serviceName)
-		defer manageService("restart", *serviceName)
 		_, err := manageService("stop", *serviceName)
 		if err != nil {
 			log.Fatalf("Failed to stop service: %v", err)
@@ -472,10 +478,5 @@ func main() {
 		log.Printf("Failed to update 3x: %v", err)
 	} else {
 		log.Printf("WireGuard key added successfully: %+v", wgResp)
-	}
-	log.Printf("Restarting service anyway: %s", *serviceName)
-	_, err = manageService("restart", *serviceName)
-	if err != nil {
-		log.Printf("Failed to restart service: %v", err)
 	}
 }
